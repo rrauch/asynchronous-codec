@@ -62,6 +62,17 @@ where
         }
     }
 
+    /// Creates a new `FramedRead` transport with the given `Decoder`
+    /// and a buffer of capacity initial size.
+    pub fn with_capacity(inner: T, decoder: D, capacity: usize) -> Self {
+        Self {
+            inner: framed_read_2(
+                Fuse::new(inner, decoder),
+                Some(BytesMut::with_capacity(capacity)),
+            ),
+        }
+    }
+
     /// Creates a new `FramedRead` from [`FramedReadParts`].
     ///
     /// See also [`FramedRead::into_parts`].
@@ -141,6 +152,7 @@ pin_project! {
         #[pin]
         inner: T,
         buffer: BytesMut,
+        capacity: usize,
     }
 }
 
@@ -161,9 +173,11 @@ impl<T> DerefMut for FramedRead2<T> {
 const INITIAL_CAPACITY: usize = 8 * 1024;
 
 pub fn framed_read_2<T>(inner: T, buffer: Option<BytesMut>) -> FramedRead2<T> {
+    let buffer = buffer.unwrap_or_else(|| BytesMut::with_capacity(INITIAL_CAPACITY));
     FramedRead2 {
         inner,
-        buffer: buffer.unwrap_or_else(|| BytesMut::with_capacity(INITIAL_CAPACITY)),
+        capacity: buffer.capacity(),
+        buffer,
     }
 }
 
@@ -180,7 +194,7 @@ where
             return Poll::Ready(Some(Ok(item)));
         }
 
-        let mut buf = [0u8; INITIAL_CAPACITY];
+        let mut buf = vec![0x00; this.capacity];
 
         loop {
             let n = ready!(Pin::new(&mut this.inner).poll_read(cx, &mut buf))?;
