@@ -1,7 +1,7 @@
 use super::fuse::Fuse;
 use super::Decoder;
 
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use futures_sink::Sink;
 use futures_util::io::AsyncRead;
 use futures_util::ready;
@@ -190,15 +190,40 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
 
+        // Attempt to decode a frame from the existing buffer first.
         if let Some(item) = this.inner.decode(&mut this.buffer)? {
             return Poll::Ready(Some(Ok(item)));
         }
 
-        let mut buf = vec![0x00; this.capacity];
+        // Reserve buffer space to avoid frequent reallocations.
+        this.buffer.reserve(this.capacity);
 
         loop {
-            let n = ready!(Pin::new(&mut this.inner).poll_read(cx, &mut buf))?;
-            this.buffer.extend_from_slice(&buf[..n]);
+            // If the buffer has no more spare capacity, reserve more.
+            // This prevents passing a zero-length slice to `poll_read`.
+            if !this.buffer.has_remaining_mut() {
+                // buffer is full
+                this.buffer.reserve(this.capacity);
+            }
+
+            // Create a mutable slice pointing to the buffer's potentially
+            // uninitialized spare capacity.
+            //
+            // SAFETY: This code relies on the de-facto contract that `poll_read`
+            // implementations will not read from the buffer before writing to it.
+            let buf = unsafe {
+                let chunk = this.buffer.chunk_mut();
+                std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len())
+            };
+
+            let n = ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
+
+            // SAFETY: The `poll_read` call has initialized `n` bytes of the buffer.
+            // We can now safely advance the buffer's length to make these bytes
+            // available for consumption by the decoder.
+            unsafe {
+                this.buffer.advance_mut(n);
+            }
 
             let ended = n == 0;
 
