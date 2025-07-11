@@ -196,24 +196,24 @@ where
         }
 
         // Reserve buffer space to avoid frequent reallocations.
-        this.buffer.reserve(this.capacity);
+        this.ensure_safe_buf_capacity(this.capacity);
 
         loop {
             // If the buffer has no more spare capacity, reserve more.
             // This prevents passing a zero-length slice to `poll_read`.
             if this.buffer.spare_capacity_mut().is_empty() {
                 // buffer is full
-                this.buffer.reserve(this.capacity);
+                this.ensure_safe_buf_capacity(this.capacity);
             }
 
             // Create a mutable slice pointing to the buffer's potentially
             // uninitialized spare capacity.
             //
-            // SAFETY: This code relies on the de-facto contract that `poll_read`
-            // implementations will not read from the buffer before writing to it.
+            // SAFETY: the previous call to `[ensure_safe_buf_capacity]` ensures
+            // all bytes of the buffer are initialized.
             let buf = unsafe {
-                let chunk = this.buffer.chunk_mut();
-                std::slice::from_raw_parts_mut(chunk.as_mut_ptr(), chunk.len())
+                let chunk = this.buffer.spare_capacity_mut();
+                std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut _, chunk.len())
             };
 
             let n = ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
@@ -222,7 +222,7 @@ where
                 "reader returned invalid number of bytes read"
             );
 
-            // SAFETY: The `poll_read` call has initialized `n` bytes of the buffer.
+            // SAFETY: The `poll_read` call has read `n` bytes of the buffer.
             // We can now safely advance the buffer's length to make these bytes
             // available for consumption by the decoder.
             unsafe {
@@ -283,6 +283,26 @@ impl<T> FramedRead2<T> {
 
     pub fn buffer(&self) -> &BytesMut {
         &self.buffer
+    }
+
+    fn ensure_safe_buf_capacity(&mut self, required_capacity: usize) {
+        let existing_capacity = self.buffer.spare_capacity_mut().len();
+        if required_capacity > existing_capacity {
+            self.buffer.reserve(required_capacity);
+
+            let spare = self.buffer.spare_capacity_mut();
+
+            if spare.len() > existing_capacity {
+                // SAFETY: We're zero-initializing newly allocated uninitialized memory.
+                // The slice bounds are guaranteed valid since we're using a subslice
+                // of spare_capacity_mut(), and writing to MaybeUninit<u8> as u8 is safe.
+                unsafe {
+                    let uninit = &mut spare[existing_capacity..];
+                    // Zero-initialize all spare capacity after the existing capacity
+                    std::ptr::write_bytes(uninit.as_mut_ptr() as *mut u8, 0x00, uninit.len());
+                }
+            }
+        }
     }
 }
 
