@@ -201,7 +201,7 @@ where
         loop {
             // If the buffer has no more spare capacity, reserve more.
             // This prevents passing a zero-length slice to `poll_read`.
-            if !this.buffer.has_remaining_mut() {
+            if this.buffer.spare_capacity_mut().is_empty() {
                 // buffer is full
                 this.buffer.reserve(this.capacity);
             }
