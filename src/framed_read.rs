@@ -217,6 +217,10 @@ where
             };
 
             let n = ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
+            assert!(
+                n <= buf.len(),
+                "reader returned invalid number of bytes read"
+            );
 
             // SAFETY: The `poll_read` call has initialized `n` bytes of the buffer.
             // We can now safely advance the buffer's length to make these bytes
