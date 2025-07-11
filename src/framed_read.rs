@@ -206,8 +206,7 @@ where
                 this.ensure_safe_buf_capacity(this.capacity);
             }
 
-            // Create a mutable slice pointing to the buffer's potentially
-            // uninitialized spare capacity.
+            // Create a mutable slice pointing to the buffer's spare capacity.
             //
             // SAFETY: the previous call to `[ensure_safe_buf_capacity]` ensures
             // all bytes of the buffer are initialized.
@@ -222,7 +221,7 @@ where
                 "reader returned invalid number of bytes read"
             );
 
-            // SAFETY: The `poll_read` call has read `n` bytes of the buffer.
+            // SAFETY: The `poll_read` call has filled `n` bytes of the buffer.
             // We can now safely advance the buffer's length to make these bytes
             // available for consumption by the decoder.
             unsafe {
