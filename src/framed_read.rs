@@ -192,23 +192,15 @@ impl<T> DerefMut for FramedRead2<T> {
     }
 }
 
-const INITIAL_CAPACITY: usize = 8 * 1024;
+const DEFAULT_CAPACITY: usize = 8 * 1024;
 
 pub fn framed_read_2<T>(inner: T, buffer: Option<BytesMut>) -> FramedRead2<T> {
-    let buffer = buffer.unwrap_or_else(|| BytesMut::new());
-    framed_read_2_with_capacity(inner, buffer, INITIAL_CAPACITY)
-}
-
-fn framed_read_2_with_capacity<T>(
-    inner: T,
-    mut buffer: BytesMut,
-    capacity: usize,
-) -> FramedRead2<T> {
+    let mut buffer = buffer.unwrap_or_else(|| BytesMut::new());
     // Ensure any spare capacity of the supplied buffer is initialized.
     init_buffer(buffer.spare_capacity_mut());
     FramedRead2 {
         inner,
-        capacity,
+        capacity: DEFAULT_CAPACITY,
         buffer,
         buffer_init_disabled: false,
     }
