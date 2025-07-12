@@ -134,6 +134,25 @@ where
     pub fn read_buffer(&self) -> &BytesMut {
         &self.inner.buffer
     }
+
+    /// Disables zero-initialization of newly allocated buffer capacity.
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee that the underlying `AsyncRead` implementation
+    /// will never read from the buffer before writing to it. Violating this
+    /// contract results in undefined behavior as uninitialized memory may be read.
+    ///
+    /// Most well-behaved `AsyncRead` implementations satisfy this requirement,
+    /// but some implementations may not.
+    ///
+    /// # Performance
+    ///
+    /// Disabling initialization can provide significant performance improvements
+    /// for high-throughput scenarios by eliminating memory zeroing overhead.
+    pub unsafe fn disable_buffer_initialization(&mut self) {
+        self.inner.buffer_init_disabled = true;
+    }
 }
 
 impl<T, D> Stream for FramedRead<T, D>
@@ -155,6 +174,7 @@ pin_project! {
         inner: T,
         buffer: BytesMut,
         capacity: usize,
+        buffer_init_disabled: bool,
     }
 }
 
@@ -190,6 +210,7 @@ fn framed_read_2_with_capacity<T>(
         inner,
         capacity,
         buffer,
+        buffer_init_disabled: false,
     }
 }
 
@@ -214,8 +235,7 @@ where
                 // No spare capacity left, reserve a new chunk of `this.capacity` bytes.
                 this.buffer.reserve(this.capacity);
                 let spare = this.buffer.spare_capacity_mut();
-                if !spare.is_empty() {
-                    // Spare capacity has increased.
+                if !spare.is_empty() && !this.buffer_init_disabled {
                     // Initialize the new capacity to avoid the risk of UB.
                     init_buffer(spare);
                 }
