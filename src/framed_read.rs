@@ -9,6 +9,7 @@ use futures_util::stream::{Stream, TryStreamExt};
 use pin_project_lite::pin_project;
 use std::io;
 use std::marker::Unpin;
+use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -66,9 +67,10 @@ where
     /// and a buffer of capacity initial size.
     pub fn with_capacity(inner: T, decoder: D, capacity: usize) -> Self {
         Self {
-            inner: framed_read_2(
+            inner: framed_read_2_with_capacity(
                 Fuse::new(inner, decoder),
-                Some(BytesMut::with_capacity(capacity)),
+                BytesMut::new(),
+                capacity,
             ),
         }
     }
@@ -173,10 +175,20 @@ impl<T> DerefMut for FramedRead2<T> {
 const INITIAL_CAPACITY: usize = 8 * 1024;
 
 pub fn framed_read_2<T>(inner: T, buffer: Option<BytesMut>) -> FramedRead2<T> {
-    let buffer = buffer.unwrap_or_else(|| BytesMut::with_capacity(INITIAL_CAPACITY));
+    let buffer = buffer.unwrap_or_else(|| BytesMut::new());
+    framed_read_2_with_capacity(inner, buffer, INITIAL_CAPACITY)
+}
+
+fn framed_read_2_with_capacity<T>(
+    inner: T,
+    mut buffer: BytesMut,
+    capacity: usize,
+) -> FramedRead2<T> {
+    // Ensure any spare capacity of the supplied buffer is initialized.
+    init_buffer(buffer.spare_capacity_mut());
     FramedRead2 {
         inner,
-        capacity: buffer.capacity(),
+        capacity,
         buffer,
     }
 }
@@ -195,15 +207,18 @@ where
             return Poll::Ready(Some(Ok(item)));
         }
 
-        // Reserve buffer space to avoid frequent reallocations.
-        this.ensure_safe_buf_capacity(this.capacity);
-
         loop {
             // If the buffer has no more spare capacity, reserve more.
             // This prevents passing a zero-length slice to `poll_read`.
             if this.buffer.spare_capacity_mut().is_empty() {
-                // buffer is full
-                this.ensure_safe_buf_capacity(this.capacity);
+                // No spare capacity left, reserve a new chunk of `this.capacity` bytes.
+                this.buffer.reserve(this.capacity);
+                let spare = this.buffer.spare_capacity_mut();
+                if !spare.is_empty() {
+                    // Spare capacity has increased.
+                    // Initialize the new capacity to avoid the risk of UB.
+                    init_buffer(spare);
+                }
             }
 
             // Create a mutable slice pointing to the buffer's spare capacity.
@@ -283,26 +298,6 @@ impl<T> FramedRead2<T> {
     pub fn buffer(&self) -> &BytesMut {
         &self.buffer
     }
-
-    fn ensure_safe_buf_capacity(&mut self, required_capacity: usize) {
-        let existing_capacity = self.buffer.spare_capacity_mut().len();
-        if required_capacity > existing_capacity {
-            self.buffer.reserve(required_capacity);
-
-            let spare = self.buffer.spare_capacity_mut();
-
-            if spare.len() > existing_capacity {
-                // SAFETY: We're zero-initializing newly allocated uninitialized memory.
-                // The slice bounds are guaranteed valid since we're using a subslice
-                // of spare_capacity_mut(), and writing to MaybeUninit<u8> as u8 is safe.
-                unsafe {
-                    let uninit = &mut spare[existing_capacity..];
-                    // Zero-initialize all spare capacity after the existing capacity
-                    std::ptr::write_bytes(uninit.as_mut_ptr() as *mut u8, 0x00, uninit.len());
-                }
-            }
-        }
-    }
 }
 
 /// The parts obtained from (FramedRead::into_parts).
@@ -331,5 +326,14 @@ impl<T, D> FramedReadParts<T, D> {
             buffer: self.buffer,
             _priv: (),
         }
+    }
+}
+
+#[inline]
+fn init_buffer(uninit: &mut [MaybeUninit<u8>]) {
+    // SAFETY: We're zero-initializing possibly uninitialized memory.
+    // The slice bounds are guaranteed valid and writing to MaybeUninit<u8> as u8 is safe.
+    unsafe {
+        std::ptr::write_bytes(uninit.as_mut_ptr() as *mut u8, 0x00, uninit.len());
     }
 }
