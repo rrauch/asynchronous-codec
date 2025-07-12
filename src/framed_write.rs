@@ -3,7 +3,7 @@ use super::Encoder;
 use bytes::{Buf, BytesMut};
 use futures_sink::Sink;
 use futures_util::io::{AsyncRead, AsyncWrite};
-use futures_util::ready;
+use futures_util::{ready, AsyncBufRead};
 use pin_project_lite::pin_project;
 use std::io::{Error, ErrorKind};
 use std::marker::Unpin;
@@ -211,13 +211,23 @@ pub fn framed_write_2<T>(inner: T, buffer: Option<BytesMut>) -> FramedWrite2<T> 
     }
 }
 
-impl<T: AsyncRead + Unpin> AsyncRead for FramedWrite2<T> {
+impl<T: AsyncRead> AsyncRead for FramedWrite2<T> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<Result<usize, Error>> {
         self.project().inner.poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncBufRead> AsyncBufRead for FramedWrite2<T> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<&[u8]>> {
+        self.project().inner.poll_fill_buf(cx)
+    }
+
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        self.project().inner.consume(amt)
     }
 }
 

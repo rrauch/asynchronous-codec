@@ -3,7 +3,7 @@ use super::Decoder;
 
 use bytes::{BufMut, BytesMut};
 use futures_sink::Sink;
-use futures_util::io::AsyncRead;
+use futures_util::io::{AsyncBufRead, AsyncRead};
 use futures_util::ready;
 use futures_util::stream::{Stream, TryStreamExt};
 use pin_project_lite::pin_project;
@@ -33,52 +33,25 @@ use std::task::{Context, Poll};
 /// # }).unwrap();
 /// ```
 #[derive(Debug)]
-pub struct FramedRead<T, D> {
-    inner: FramedRead2<Fuse<T, D>>,
+pub struct FramedRead<T, D, R = AsyncReadStrategy> {
+    inner: FramedRead2<Fuse<T, D>, R>,
 }
 
-impl<T, D> Deref for FramedRead<T, D> {
+impl<T, D, R> Deref for FramedRead<T, D, R> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        &self.inner
+        &self.inner.inner
     }
 }
 
-impl<T, D> DerefMut for FramedRead<T, D> {
+impl<T, D, R> DerefMut for FramedRead<T, D, R> {
     fn deref_mut(&mut self) -> &mut T {
-        &mut self.inner
+        &mut self.inner.inner
     }
 }
 
-impl<T, D> FramedRead<T, D>
-where
-    T: AsyncRead,
-    D: Decoder,
-{
-    /// Creates a new `FramedRead` transport with the given `Decoder`.
-    pub fn new(inner: T, decoder: D) -> Self {
-        Self {
-            inner: framed_read_2(Fuse::new(inner, decoder), None),
-        }
-    }
-
-    /// Creates a new `FramedRead` from [`FramedReadParts`].
-    ///
-    /// See also [`FramedRead::into_parts`].
-    pub fn from_parts(
-        FramedReadParts {
-            io,
-            decoder,
-            buffer,
-            ..
-        }: FramedReadParts<T, D>,
-    ) -> Self {
-        Self {
-            inner: framed_read_2(Fuse::new(io, decoder), Some(buffer)),
-        }
-    }
-
+impl<T, D, R> FramedRead<T, D, R> {
     /// Consumes the `FramedRead`, returning its parts such that a
     /// new `FramedRead` may be constructed, possibly with a different decoder.
     ///
@@ -122,6 +95,35 @@ where
     pub fn read_buffer(&self) -> &BytesMut {
         &self.inner.buffer
     }
+}
+
+impl<T, D> FramedRead<T, D, AsyncReadStrategy>
+where
+    T: AsyncRead,
+    D: Decoder,
+{
+    /// Creates a new `FramedRead` transport with the given `Decoder`.
+    pub fn new(inner: T, decoder: D) -> Self {
+        Self {
+            inner: framed_read_2(Fuse::new(inner, decoder), None),
+        }
+    }
+
+    /// Creates a new `FramedRead` from [`FramedReadParts`].
+    ///
+    /// See also [`FramedRead::into_parts`].
+    pub fn from_parts(
+        FramedReadParts {
+            io,
+            decoder,
+            buffer,
+            ..
+        }: FramedReadParts<T, D>,
+    ) -> Self {
+        Self {
+            inner: framed_read_2(Fuse::new(io, decoder), Some(buffer)),
+        }
+    }
 
     /// Disables zero-initialization of newly allocated buffer capacity.
     ///
@@ -155,10 +157,40 @@ where
     }
 }
 
-impl<T, D> Stream for FramedRead<T, D>
+impl<T, D> FramedRead<T, D, AsyncBufReadStrategy>
 where
-    T: AsyncRead + Unpin,
+    T: AsyncBufRead,
     D: Decoder,
+{
+    /// Creates a new *buffered* `FramedRead` transport with the given `Decoder`.
+    pub fn new_buffered(inner: T, decoder: D) -> Self {
+        Self {
+            inner: framed_read_buffered(Fuse::new(inner, decoder), None),
+        }
+    }
+
+    /// Creates a new *buffered* `FramedRead` from [`FramedReadParts`].
+    ///
+    /// See also [`FramedRead::into_parts`].
+    pub fn from_parts_buffered(
+        FramedReadParts {
+            io,
+            decoder,
+            buffer,
+            ..
+        }: FramedReadParts<T, D>,
+    ) -> Self {
+        Self {
+            inner: framed_read_buffered(Fuse::new(io, decoder), Some(buffer)),
+        }
+    }
+}
+
+impl<T, D, R> Stream for FramedRead<T, D, R>
+where
+    T: Unpin,
+    D: Decoder,
+    R: ReadStrategy<Fuse<T, D>>,
 {
     type Item = Result<D::Item, D::Error>;
 
@@ -167,18 +199,111 @@ where
     }
 }
 
-pin_project! {
-    #[derive(Debug)]
-    pub struct FramedRead2<T> {
-        #[pin]
-        inner: T,
-        buffer: BytesMut,
-        capacity: usize,
-        buffer_init_disabled: bool,
+mod private_read_strategy {
+    pub trait Sealed {}
+
+    impl Sealed for super::AsyncReadStrategy {}
+    impl Sealed for super::AsyncBufReadStrategy {}
+}
+
+pub trait ReadStrategy<T>: private_read_strategy::Sealed {
+    fn read_into_buffer(
+        &mut self,
+        reader: Pin<&mut T>,
+        buffer: &mut BytesMut,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<usize, io::Error>>;
+}
+
+#[derive(Debug)]
+pub struct AsyncReadStrategy {
+    capacity: usize,
+    buffer_init_disabled: bool,
+}
+
+impl<T: AsyncRead> ReadStrategy<T> for AsyncReadStrategy {
+    fn read_into_buffer(
+        &mut self,
+        reader: Pin<&mut T>,
+        buffer: &mut BytesMut,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<usize, io::Error>> {
+        // If the buffer has no more spare capacity, reserve more.
+        // This prevents passing a zero-length slice to `poll_read`.
+        if buffer.spare_capacity_mut().is_empty() {
+            // No spare capacity left, reserve a new chunk of `capacity` bytes.
+            buffer.reserve(self.capacity);
+            let spare = buffer.spare_capacity_mut();
+            if !spare.is_empty() && !self.buffer_init_disabled {
+                // Initialize the new capacity to avoid the risk of UB.
+                init_buffer(spare);
+            }
+        }
+
+        // Create a mutable slice pointing to the buffer's spare capacity.
+        //
+        // SAFETY: This is safe because either:
+        // a) a previous call to `init_buffer` has zero-initialized
+        //    all spare capacity bytes, or
+        // b) buffer initialization was disabled but the caller guarantees the
+        //    underlying AsyncRead will not read from the buffer before writing to it.
+        let buf = unsafe {
+            let chunk = buffer.spare_capacity_mut();
+            std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut _, chunk.len())
+        };
+
+        let n = ready!(reader.poll_read(cx, buf))?;
+        assert!(
+            n <= buf.len(),
+            "reader returned invalid number of bytes read"
+        );
+
+        // SAFETY: The `poll_read` call has filled `n` bytes of the buffer.
+        // We can now safely advance the buffer's length to make these bytes
+        // available for consumption by the decoder.
+        unsafe {
+            buffer.advance_mut(n);
+        }
+
+        Poll::Ready(Ok(n))
     }
 }
 
-impl<T> Deref for FramedRead2<T> {
+#[derive(Debug)]
+pub struct AsyncBufReadStrategy;
+
+impl<T: AsyncBufRead> ReadStrategy<T> for AsyncBufReadStrategy {
+    fn read_into_buffer(
+        &mut self,
+        mut reader: Pin<&mut T>,
+        buffer: &mut BytesMut,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<usize, io::Error>> {
+        let filled_buf = ready!(reader.as_mut().poll_fill_buf(cx))?;
+        if filled_buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        buffer.extend_from_slice(filled_buf);
+        let n = filled_buf.len();
+        reader.consume(n);
+
+        Poll::Ready(Ok(n))
+    }
+}
+
+pin_project! {
+    #[derive(Debug)]
+    pub struct FramedRead2<T, R>
+    {
+        #[pin]
+        inner: T,
+        buffer: BytesMut,
+        strategy: R,
+    }
+}
+
+impl<T, R> Deref for FramedRead2<T, R> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -186,7 +311,7 @@ impl<T> Deref for FramedRead2<T> {
     }
 }
 
-impl<T> DerefMut for FramedRead2<T> {
+impl<T, R> DerefMut for FramedRead2<T, R> {
     fn deref_mut(&mut self) -> &mut T {
         &mut self.inner
     }
@@ -194,21 +319,38 @@ impl<T> DerefMut for FramedRead2<T> {
 
 const DEFAULT_CAPACITY: usize = 8 * 1024;
 
-pub fn framed_read_2<T>(inner: T, buffer: Option<BytesMut>) -> FramedRead2<T> {
+pub fn framed_read_2<T: AsyncRead>(
+    inner: T,
+    buffer: Option<BytesMut>,
+) -> FramedRead2<T, AsyncReadStrategy> {
     let mut buffer = buffer.unwrap_or_else(|| BytesMut::new());
     // Ensure any spare capacity of the supplied buffer is initialized.
     init_buffer(buffer.spare_capacity_mut());
     FramedRead2 {
         inner,
-        capacity: DEFAULT_CAPACITY,
         buffer,
-        buffer_init_disabled: false,
+        strategy: AsyncReadStrategy {
+            capacity: DEFAULT_CAPACITY,
+            buffer_init_disabled: false,
+        },
     }
 }
 
-impl<T> Stream for FramedRead2<T>
+pub fn framed_read_buffered<T: AsyncBufRead>(
+    inner: T,
+    buffer: Option<BytesMut>,
+) -> FramedRead2<T, AsyncBufReadStrategy> {
+    FramedRead2 {
+        inner,
+        buffer: buffer.unwrap_or_else(|| BytesMut::new()),
+        strategy: AsyncBufReadStrategy,
+    }
+}
+
+impl<T, R> Stream for FramedRead2<T, R>
 where
-    T: AsyncRead + Decoder + Unpin,
+    T: Decoder + Unpin,
+    R: ReadStrategy<T>,
 {
     type Item = Result<T::Item, T::Error>;
 
@@ -221,42 +363,12 @@ where
         }
 
         loop {
-            // If the buffer has no more spare capacity, reserve more.
-            // This prevents passing a zero-length slice to `poll_read`.
-            if this.buffer.spare_capacity_mut().is_empty() {
-                // No spare capacity left, reserve a new chunk of `this.capacity` bytes.
-                this.buffer.reserve(this.capacity);
-                let spare = this.buffer.spare_capacity_mut();
-                if !spare.is_empty() && !this.buffer_init_disabled {
-                    // Initialize the new capacity to avoid the risk of UB.
-                    init_buffer(spare);
-                }
-            }
-
-            // Create a mutable slice pointing to the buffer's spare capacity.
-            //
-            // SAFETY: This is safe because either:
-            // a) a previous call to `init_buffer` has zero-initialized
-            //    all spare capacity bytes, or
-            // b) buffer initialization was disabled but the caller guarantees the
-            //    underlying AsyncRead will not read from the buffer before writing to it.
-            let buf = unsafe {
-                let chunk = this.buffer.spare_capacity_mut();
-                std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut _, chunk.len())
-            };
-
-            let n = ready!(Pin::new(&mut this.inner).poll_read(cx, buf))?;
-            assert!(
-                n <= buf.len(),
-                "reader returned invalid number of bytes read"
-            );
-
-            // SAFETY: The `poll_read` call has filled `n` bytes of the buffer.
-            // We can now safely advance the buffer's length to make these bytes
-            // available for consumption by the decoder.
-            unsafe {
-                this.buffer.advance_mut(n);
-            }
+            // Reading is delegated to the configured ReadStrategy
+            let n = ready!(this.strategy.read_into_buffer(
+                Pin::new(&mut this.inner),
+                &mut this.buffer,
+                cx
+            ))?;
 
             let ended = n == 0;
 
@@ -285,7 +397,7 @@ where
     }
 }
 
-impl<T, I> Sink<I> for FramedRead2<T>
+impl<T, R, I> Sink<I> for FramedRead2<T, R>
 where
     T: Sink<I> + Unpin,
 {
@@ -305,7 +417,7 @@ where
     }
 }
 
-impl<T> FramedRead2<T> {
+impl<T, R> FramedRead2<T, R> {
     pub fn into_parts(self) -> (T, BytesMut) {
         (self.inner, self.buffer)
     }
@@ -313,14 +425,16 @@ impl<T> FramedRead2<T> {
     pub fn buffer(&self) -> &BytesMut {
         &self.buffer
     }
+}
 
+impl<T> FramedRead2<T, AsyncReadStrategy> {
     pub unsafe fn disable_buffer_initialization(&mut self) {
-        self.buffer_init_disabled = true;
+        self.strategy.buffer_init_disabled = true;
     }
 
     pub fn set_capacity(&mut self, capacity: usize) {
         assert!(capacity > 0);
-        self.capacity = capacity
+        self.strategy.capacity = capacity
     }
 }
 

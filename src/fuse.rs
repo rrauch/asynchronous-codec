@@ -1,4 +1,4 @@
-use futures_util::io::{AsyncRead, AsyncWrite};
+use futures_util::io::{AsyncBufRead, AsyncRead, AsyncWrite};
 use pin_project_lite::pin_project;
 use std::io::Error;
 use std::marker::Unpin;
@@ -35,13 +35,23 @@ impl<T, U> DerefMut for Fuse<T, U> {
     }
 }
 
-impl<T: AsyncRead + Unpin, U> AsyncRead for Fuse<T, U> {
+impl<T: AsyncRead, U> AsyncRead for Fuse<T, U> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<Result<usize, Error>> {
         self.project().t.poll_read(cx, buf)
+    }
+}
+
+impl<T: AsyncBufRead, U> AsyncBufRead for Fuse<T, U> {
+    fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<&[u8], Error>> {
+        self.project().t.poll_fill_buf(cx)
+    }
+
+    fn consume(self: Pin<&mut Self>, amt: usize) {
+        self.project().t.consume(amt)
     }
 }
 

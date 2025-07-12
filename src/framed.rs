@@ -1,4 +1,7 @@
-use super::framed_read::{framed_read_2, FramedRead2};
+use super::framed_read::{
+    framed_read_2, framed_read_buffered, AsyncBufReadStrategy, AsyncReadStrategy, FramedRead2,
+    ReadStrategy,
+};
 use super::framed_write::{framed_write_2, FramedWrite2};
 use super::fuse::Fuse;
 use super::{Decoder, Encoder};
@@ -6,12 +9,12 @@ use bytes::BytesMut;
 use futures_sink::Sink;
 use futures_util::io::{AsyncRead, AsyncWrite};
 use futures_util::stream::{Stream, TryStreamExt};
+use futures_util::AsyncBufRead;
 use pin_project_lite::pin_project;
 use std::marker::Unpin;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-
 // Needed only for doc links
 // Otherwise the `See` links won't resolve
 #[allow(unused_imports)]
@@ -45,13 +48,16 @@ pin_project! {
     /// # }).unwrap();
     /// ```
     #[derive(Debug)]
-    pub struct Framed<T, U> {
+    pub struct Framed<T, U, R = AsyncReadStrategy> {
         #[pin]
-        inner: FramedRead2<FramedWrite2<Fuse<T, U>>>,
+        inner: FramedRead2<FramedWrite2<Fuse<T, U>>, R>,
     }
 }
 
-impl<T, U> Deref for Framed<T, U> {
+impl<T, U, R> Deref for Framed<T, U, R>
+where
+    R: ReadStrategy<T>,
+{
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -59,42 +65,21 @@ impl<T, U> Deref for Framed<T, U> {
     }
 }
 
-impl<T, U> DerefMut for Framed<T, U> {
+impl<T, U, R> DerefMut for Framed<T, U, R>
+where
+    R: ReadStrategy<T>,
+{
     fn deref_mut(&mut self) -> &mut T {
         &mut self.inner
     }
 }
 
-impl<T, U> Framed<T, U>
+impl<T, U, R> Framed<T, U, R>
 where
     T: AsyncRead + AsyncWrite,
     U: Decoder + Encoder,
+    R: ReadStrategy<T>,
 {
-    /// Creates a new `Framed` transport with the given codec.
-    /// A codec is a type which implements `Decoder` and `Encoder`.
-    pub fn new(inner: T, codec: U) -> Self {
-        Self {
-            inner: framed_read_2(framed_write_2(Fuse::new(inner, codec), None), None),
-        }
-    }
-
-    /// Creates a new `Framed` from [`FramedParts`].
-    ///
-    /// See also [`Framed::into_parts`].
-    pub fn from_parts(
-        FramedParts {
-            io,
-            codec,
-            write_buffer,
-            read_buffer,
-            ..
-        }: FramedParts<T, U>,
-    ) -> Self {
-        let framed_write = framed_write_2(Fuse::new(io, codec), Some(write_buffer));
-        let framed_read = framed_read_2(framed_write, Some(read_buffer));
-        Self { inner: framed_read }
-    }
-
     /// Consumes the `Framed`, returning its parts, such that a new
     /// `Framed` may be constructed, possibly with a different codec.
     ///
@@ -143,20 +128,6 @@ where
         self.inner.buffer()
     }
 
-    /// Disables zero-initialization of newly allocated read buffer capacity.
-    ///
-    /// See [`FramedRead::disable_buffer_initialization`].
-    pub unsafe fn disable_read_buffer_initialization(&mut self) {
-        self.inner.disable_buffer_initialization()
-    }
-
-    /// Sets the buffer capacity for read operations.
-    ///
-    /// See [`FramedRead::set_capacity`].
-    pub fn set_read_capacity(&mut self, capacity: usize) {
-        self.inner.set_capacity(capacity)
-    }
-
     /// High-water mark for writes, in bytes
     ///
     /// See [`FramedWrite::send_high_water_mark`].
@@ -172,10 +143,87 @@ where
     }
 }
 
-impl<T, U> Stream for Framed<T, U>
+impl<T, U> Framed<T, U, AsyncReadStrategy>
+where
+    T: AsyncRead + AsyncWrite,
+    U: Decoder + Encoder,
+{
+    /// Creates a new `Framed` transport with the given codec.
+    /// A codec is a type which implements `Decoder` and `Encoder`.
+    pub fn new(inner: T, codec: U) -> Self {
+        Self {
+            inner: framed_read_2(framed_write_2(Fuse::new(inner, codec), None), None),
+        }
+    }
+
+    /// Creates a new `Framed` from [`FramedParts`].
+    ///
+    /// See also [`Framed::into_parts`].
+    pub fn from_parts(
+        FramedParts {
+            io,
+            codec,
+            write_buffer,
+            read_buffer,
+            ..
+        }: FramedParts<T, U>,
+    ) -> Self {
+        let framed_write = framed_write_2(Fuse::new(io, codec), Some(write_buffer));
+        let framed_read = framed_read_2(framed_write, Some(read_buffer));
+        Self { inner: framed_read }
+    }
+
+    /// Disables zero-initialization of newly allocated read buffer capacity.
+    ///
+    /// See [`FramedRead::disable_buffer_initialization`].
+    pub unsafe fn disable_read_buffer_initialization(&mut self) {
+        self.inner.disable_buffer_initialization()
+    }
+
+    /// Sets the buffer capacity for read operations.
+    ///
+    /// See [`FramedRead::set_capacity`].
+    pub fn set_read_capacity(&mut self, capacity: usize) {
+        self.inner.set_capacity(capacity)
+    }
+}
+
+impl<T, U> Framed<T, U, AsyncBufReadStrategy>
+where
+    T: AsyncBufRead + AsyncWrite,
+    U: Decoder + Encoder,
+{
+    /// Creates a new *buffered* `Framed` transport with the given codec.
+    /// A codec is a type which implements `Decoder` and `Encoder`.
+    pub fn new_buffered(inner: T, codec: U) -> Self {
+        Self {
+            inner: framed_read_buffered(framed_write_2(Fuse::new(inner, codec), None), None),
+        }
+    }
+
+    /// Creates a new *buffered* `Framed` from [`FramedParts`].
+    ///
+    /// See also [`Framed::into_parts`].
+    pub fn from_parts_buffered(
+        FramedParts {
+            io,
+            codec,
+            write_buffer,
+            read_buffer,
+            ..
+        }: FramedParts<T, U>,
+    ) -> Self {
+        let framed_write = framed_write_2(Fuse::new(io, codec), Some(write_buffer));
+        let framed_read = framed_read_buffered(framed_write, Some(read_buffer));
+        Self { inner: framed_read }
+    }
+}
+
+impl<T, U, R> Stream for Framed<T, U, R>
 where
     T: AsyncRead + Unpin,
     U: Decoder,
+    R: ReadStrategy<FramedWrite2<Fuse<T, U>>>,
 {
     type Item = Result<U::Item, U::Error>;
 
@@ -184,7 +232,7 @@ where
     }
 }
 
-impl<T, U> Sink<U::Item<'_>> for Framed<T, U>
+impl<T, U, R> Sink<U::Item<'_>> for Framed<T, U, R>
 where
     T: AsyncWrite + Unpin,
     U: Encoder,
