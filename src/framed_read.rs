@@ -264,8 +264,11 @@ where
 
             // Create a mutable slice pointing to the buffer's spare capacity.
             //
-            // SAFETY: the previous call to `[ensure_safe_buf_capacity]` ensures
-            // all bytes of the buffer are initialized.
+            // SAFETY: This is safe because either:
+            // a) a previous call to `init_buffer` has zero-initialized
+            //    all spare capacity bytes, or
+            // b) buffer initialization was disabled but the caller guarantees the
+            //    underlying AsyncRead will not read from the buffer before writing to it.
             let buf = unsafe {
                 let chunk = this.buffer.spare_capacity_mut();
                 std::slice::from_raw_parts_mut(chunk.as_mut_ptr() as *mut _, chunk.len())
