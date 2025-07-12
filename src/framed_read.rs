@@ -64,8 +64,16 @@ where
     }
 
     /// Creates a new `FramedRead` transport with the given `Decoder`
-    /// and a buffer of capacity initial size.
+    /// and specified buffer capacity.
+    ///
+    /// `capacity` determines how many bytes will be reserved when the buffer needs
+    /// to grow. Larger capacities reduce allocation frequency but use more memory.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is zero.
     pub fn with_capacity(inner: T, decoder: D, capacity: usize) -> Self {
+        assert!(capacity > 0);
         Self {
             inner: framed_read_2_with_capacity(
                 Fuse::new(inner, decoder),
@@ -152,6 +160,19 @@ where
     /// for high-throughput scenarios by eliminating memory zeroing overhead.
     pub unsafe fn disable_buffer_initialization(&mut self) {
         self.inner.buffer_init_disabled = true;
+    }
+
+    /// Sets the buffer capacity for read operations.
+    ///
+    /// This determines how many bytes will be reserved when the buffer needs
+    /// to grow. Larger capacities reduce allocation frequency but use more memory.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is zero.
+    pub fn set_capacity(&mut self, capacity: usize) {
+        assert!(capacity > 0);
+        self.inner.capacity = capacity
     }
 }
 
