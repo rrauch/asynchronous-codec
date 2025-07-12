@@ -63,26 +63,6 @@ where
         }
     }
 
-    /// Creates a new `FramedRead` transport with the given `Decoder`
-    /// and specified buffer capacity.
-    ///
-    /// `capacity` determines how many bytes will be reserved when the buffer needs
-    /// to grow. Larger capacities reduce allocation frequency but use more memory.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `capacity` is zero.
-    pub fn with_capacity(inner: T, decoder: D, capacity: usize) -> Self {
-        assert!(capacity > 0);
-        Self {
-            inner: framed_read_2_with_capacity(
-                Fuse::new(inner, decoder),
-                BytesMut::new(),
-                capacity,
-            ),
-        }
-    }
-
     /// Creates a new `FramedRead` from [`FramedReadParts`].
     ///
     /// See also [`FramedRead::into_parts`].
@@ -159,7 +139,7 @@ where
     /// Disabling initialization can provide significant performance improvements
     /// for high-throughput scenarios by eliminating memory zeroing overhead.
     pub unsafe fn disable_buffer_initialization(&mut self) {
-        self.inner.buffer_init_disabled = true;
+        self.inner.disable_buffer_initialization()
     }
 
     /// Sets the buffer capacity for read operations.
@@ -171,8 +151,7 @@ where
     ///
     /// Panics if `capacity` is zero.
     pub fn set_capacity(&mut self, capacity: usize) {
-        assert!(capacity > 0);
-        self.inner.capacity = capacity
+        self.inner.set_capacity(capacity)
     }
 }
 
@@ -341,6 +320,15 @@ impl<T> FramedRead2<T> {
 
     pub fn buffer(&self) -> &BytesMut {
         &self.buffer
+    }
+
+    pub unsafe fn disable_buffer_initialization(&mut self) {
+        self.buffer_init_disabled = true;
+    }
+
+    pub fn set_capacity(&mut self, capacity: usize) {
+        assert!(capacity > 0);
+        self.capacity = capacity
     }
 }
 

@@ -12,6 +12,13 @@ use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+// Needed only for doc links
+// Otherwise the `See` links won't resolve
+#[allow(unused_imports)]
+use super::framed_read::FramedRead;
+#[allow(unused_imports)]
+use super::framed_write::FramedWrite;
+
 pin_project! {
     /// A unified `Stream` and `Sink` interface to an underlying I/O object,
     /// using the `Encoder` and `Decoder` traits to encode and decode frames.
@@ -134,6 +141,20 @@ where
     /// Returns a reference to the read buffer.
     pub fn read_buffer(&self) -> &BytesMut {
         self.inner.buffer()
+    }
+
+    /// Disables zero-initialization of newly allocated read buffer capacity.
+    ///
+    /// See [`FramedRead::disable_buffer_initialization`].
+    pub unsafe fn disable_read_buffer_initialization(&mut self) {
+        self.inner.disable_buffer_initialization()
+    }
+
+    /// Sets the buffer capacity for read operations.
+    ///
+    /// See [`FramedRead::set_capacity`].
+    pub fn set_read_capacity(&mut self, capacity: usize) {
+        self.inner.set_capacity(capacity)
     }
 
     /// High-water mark for writes, in bytes
