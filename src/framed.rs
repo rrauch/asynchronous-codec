@@ -143,13 +143,6 @@ where
         self.inner.buffer()
     }
 
-    /// Disables zero-initialization of newly allocated read buffer capacity.
-    ///
-    /// See [`FramedRead::disable_buffer_initialization`].
-    pub unsafe fn disable_read_buffer_initialization(&mut self) {
-        self.inner.disable_buffer_initialization()
-    }
-
     /// Sets the buffer capacity for read operations.
     ///
     /// See [`FramedRead::set_capacity`].

@@ -124,25 +124,6 @@ where
         &self.inner.buffer
     }
 
-    /// Disables zero-initialization of newly allocated buffer capacity.
-    ///
-    /// # Safety
-    ///
-    /// The caller must guarantee that the underlying `AsyncRead` implementation
-    /// will never read from the buffer before writing to it. Violating this
-    /// contract results in undefined behavior as uninitialized memory may be read.
-    ///
-    /// Most well-behaved `AsyncRead` implementations satisfy this requirement,
-    /// but some implementations may not.
-    ///
-    /// # Performance
-    ///
-    /// Disabling initialization can provide significant performance improvements
-    /// for high-throughput scenarios by eliminating memory zeroing overhead.
-    pub unsafe fn disable_buffer_initialization(&mut self) {
-        self.inner.disable_buffer_initialization()
-    }
-
     /// Sets the buffer capacity for read operations.
     ///
     /// This determines how many bytes will be reserved when the buffer needs
@@ -175,7 +156,7 @@ pin_project! {
         inner: T,
         buffer: BytesMut,
         capacity: usize,
-        buffer_init_disabled: bool,
+        allow_uninit_read: bool,
     }
 }
 
@@ -198,18 +179,18 @@ const DEFAULT_CAPACITY: usize = 8 * 1024;
 pub fn framed_read_2<T>(inner: T, buffer: Option<BytesMut>) -> FramedRead2<T> {
     let mut buffer = buffer.unwrap_or_else(|| BytesMut::new());
 
-    // Disabled buffer initialization if the inner reader is known to be safe.
-    let buffer_init_disabled = is_uninit_read::<T>();
+    // Allow using uninitialized read buffers if the inner reader is known to be safe.
+    let allow_uninit_read = is_uninit_read::<T>();
 
     // Ensure any spare capacity of the supplied buffer is initialized if necessary.
-    if !buffer_init_disabled {
+    if !allow_uninit_read {
         init_buffer(buffer.spare_capacity_mut());
     }
     FramedRead2 {
         inner,
         capacity: DEFAULT_CAPACITY,
         buffer,
-        buffer_init_disabled,
+        allow_uninit_read,
     }
 }
 
@@ -234,7 +215,7 @@ where
                 // No spare capacity left, reserve a new chunk of `this.capacity` bytes.
                 this.buffer.reserve(this.capacity);
                 let spare = this.buffer.spare_capacity_mut();
-                if !spare.is_empty() && !this.buffer_init_disabled {
+                if !spare.is_empty() && !this.allow_uninit_read {
                     // Initialize the new capacity to avoid the risk of UB.
                     init_buffer(spare);
                 }
@@ -319,10 +300,6 @@ impl<T> FramedRead2<T> {
 
     pub fn buffer(&self) -> &BytesMut {
         &self.buffer
-    }
-
-    pub unsafe fn disable_buffer_initialization(&mut self) {
-        self.buffer_init_disabled = true;
     }
 
     pub fn set_capacity(&mut self, capacity: usize) {
