@@ -13,6 +13,7 @@ use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use uninit_read::is_uninit_read;
 
 /// A `Stream` of messages decoded from an `AsyncRead`.
 ///
@@ -196,13 +197,19 @@ const DEFAULT_CAPACITY: usize = 8 * 1024;
 
 pub fn framed_read_2<T>(inner: T, buffer: Option<BytesMut>) -> FramedRead2<T> {
     let mut buffer = buffer.unwrap_or_else(|| BytesMut::new());
-    // Ensure any spare capacity of the supplied buffer is initialized.
-    init_buffer(buffer.spare_capacity_mut());
+
+    // Disabled buffer initialization if the inner reader is known to be safe.
+    let buffer_init_disabled = is_uninit_read::<T>();
+
+    // Ensure any spare capacity of the supplied buffer is initialized if necessary.
+    if !buffer_init_disabled {
+        init_buffer(buffer.spare_capacity_mut());
+    }
     FramedRead2 {
         inner,
         capacity: DEFAULT_CAPACITY,
         buffer,
-        buffer_init_disabled: false,
+        buffer_init_disabled,
     }
 }
 

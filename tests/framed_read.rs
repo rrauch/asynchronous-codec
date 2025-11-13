@@ -5,6 +5,7 @@ use futures::AsyncRead;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use uninit_read::UninitRead;
 
 // Sends two lines at once, then nothing else forever
 struct MockBurstySender {
@@ -55,6 +56,8 @@ impl AsyncRead for OneByteAtATime<'_> {
         }
     }
 }
+
+unsafe impl UninitRead for OneByteAtATime<'_> {}
 
 /// A decoder that only returns `a` characters from the input.
 struct AllTheAs;

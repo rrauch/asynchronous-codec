@@ -10,6 +10,7 @@ use std::marker::Unpin;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use uninit_read::UninitRead;
 
 pin_project! {
     /// A `Sink` of frames encoded to an `AsyncWrite`.
@@ -265,6 +266,8 @@ where
         self.project().inner.poll_close(cx).map_err(Into::into)
     }
 }
+
+unsafe impl<T: UninitRead> UninitRead for FramedWrite2<T> {}
 
 impl<T> FramedWrite2<T> {
     pub fn into_parts(self) -> (T, BytesMut) {

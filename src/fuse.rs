@@ -5,6 +5,7 @@ use std::marker::Unpin;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use uninit_read::UninitRead;
 
 pin_project! {
     #[derive(Debug)]
@@ -60,3 +61,5 @@ impl<T: AsyncWrite + Unpin, U> AsyncWrite for Fuse<T, U> {
         self.project().t.poll_close(cx)
     }
 }
+
+unsafe impl<T: UninitRead, U> UninitRead for Fuse<T, U> {}
